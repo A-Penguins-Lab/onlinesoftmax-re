@@ -7,21 +7,19 @@
 
 using namespace std;
 
-#define VECTOR 128
-
 // Define the threadDim and blockDim from here
-#define THREADDIM 128
-#define BLOCKDIM 2
+constexpr int THREADDIM = 128;
 
 __global__ void softmax(float* vecA, float* sum, int N) {
-	int idx = threadIdx.x;
-	if (idx < N) {
-		vecA[idx] = vecA[idx] / (*sum);  // dereferencing sum properly
+	int idx = threadIdx.x + blockIdx.x * blockDim.x;
+
+  if (idx < N) {
+		vecA[idx] = vecA[idx] / *sum;  // dereferencing sum properly
 	}
 }
 
 __global__ void ExponentiateKernel(float* vecA, int N) {
-	int idx = threadIdx.x;
+	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 	
 	if (idx < N) {
 		vecA[idx] = expf(vecA[idx]);
@@ -29,16 +27,43 @@ __global__ void ExponentiateKernel(float* vecA, int N) {
 }
 
 __global__ void SumReduction(float* vecA, float* sum, int N) {
-	unsigned int idx = threadIdx.x;
+    __shared__ float sdata[THREADDIM];
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    int tid = threadIdx.x;
+
+    sdata[tid] = (idx < N) ? vecA[idx] : 0.0f;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+      *sum = sdata[0];
+    }
+}
+
+__global__ void maxReduction(float* vecA, float* max, int N){ 
+	unsigned int idx = threadIdx.x + blockIdx.x * blockDim.x;
+	float maxVal;
 
 	for (unsigned int stride = blockDim.x; stride >= 1; stride /= 2){
 		if (threadIdx.x < stride) {
-			vecA[idx] += vecA[idx + stride];
+			if (vecA[idx + stride] > vecA[idx]) {
+				maxVal = vecA[idx + stride];
+			}
+			__syncthreads();
+	
 		}
-	}
+		__syncthreads();
 
-	if (threadIdx.x == 0){
-		*sum = vecA[threadIdx.x];
+	}
+	
+	if (threadIdx.x == 0) {
+		*max = maxVal;
 	}
 }
 
@@ -49,56 +74,40 @@ float* randomVec(int N) {
 		M[i] = 0.21f * i;
 	}
 
-        return M;
+  return M;
 }
 
-void RunSoftMax(int N = 4096) {
-        float* M = randomVec(N);
-
-        float *Md, *sumd;
+void RunSoftMax(int N) {
+  float* M = randomVec(N);
+  float *Md, *sumd;
 
 	cudaMalloc(&Md, sizeof(float) * N);
-        cudaMalloc(&sumd, sizeof(float)); 
-        cudaMemset(sumd, 0, sizeof(float));  // Important: initialize sum to 0
+  cudaMalloc(&sumd, sizeof(float)); 
+
+  cudaMemset(sumd, 0, sizeof(float));  // Important: initialize sum to 0
 	cudaMemcpy(Md, M, sizeof(float) * N, cudaMemcpyHostToDevice);
 
+  int threadsPerBlock = THREADDIM;
+  int blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock;
+
 	// Launch kernels
-	ExponentiateKernel<<<1, N>>>(Md, N);
-	cudaError_t err = cudaGetLastError();
+	ExponentiateKernel<<<blocksPerGrid, threadsPerBlock>>>(Md, N);
+    SumReduction<<<blocksPerGrid, threadsPerBlock>>>(Md, sumd, N);
 
-	if (err != cudaSuccess){
-		cout << "Theres some problem: " << "\n" << cudaGetErrorString(err);
-		exit(-1);
-	}
-
-
-        SumReduction<<<1, N>>>(Md, sumd, N);
-	cudaError_t err = cudaGetLastError();
-
-	if (err != cudaSuccess){
-		cout << "Theres some problem: " << "\n" << cudaGetErrorString(err);
-		exit(-1);
-	}
 
 	float sum;
 	cudaMemcpy(&sum, sumd, sizeof(float), cudaMemcpyDeviceToHost);
 
-        softmax<<<1, N>>>(Md, &sum, N);
-	cudaError_t err = cudaGetLastError();
+  softmax<<<blocksPerGrid, threadsPerBlock>>>(Md, sumd, N);
 
-	if (err != cudaSuccess){
-		cout << "Theres some problem: " << "\n" << cudaGetErrorString(err);
-		exit(-1);
-	}
+  float* result = new float[N];
+  cudaMemcpy(result, Md, sizeof(float) * N, cudaMemcpyDeviceToHost);
 
-        float* result = new float[N];
-        cudaMemcpy(result, Md, sizeof(float) * N, cudaMemcpyDeviceToHost);
-
-        // Debug print
-        for (int i = 0; i < N; i++) {
+  // Debug print
+  for (int i = 0; i < N; i++) {
 		cout << result[i] << " ";
-         }
-         cout << endl;
+  }
+  cout << endl;
 
 	// Clean up
 	cudaFree(Md);
@@ -111,9 +120,7 @@ void RunSoftMax(int N = 4096) {
 }
 
 int main() {
-	int N = 128;
+  int N = 128;
 	RunSoftMax(N);
-	
 	return 0;
 }
-

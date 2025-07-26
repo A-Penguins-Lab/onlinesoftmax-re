@@ -1,0 +1,149 @@
+#include <iostream>
+#include <cstdlib>
+#include <cuda_runtime.h>
+#include <sys/time.h>
+#include <utility>
+#include <math.h>
+
+using namespace std;
+
+#define N 128
+
+// Define the threadDim and blockDim from here
+#define THREADDIM 128
+#define BLOCKDIM 2
+
+__device__ void max_k (float a, float b) {
+	if (a >b) return a;
+	else return b;
+}
+
+__global__ void softmax(float* vecA, float* sum, int N) {
+	int idx = threadIdx.x;
+	if (idx < N) {
+		vecA[idx] = vecA[idx] / (*sum);  // dereferencing sum properly
+	}
+}
+
+__global__ void ExponentiateKernel(float* vecA, int N) {
+	int idx = threadIdx.x;
+	
+	if (idx < N) {
+		vecA[idx] = expf(vecA[idx]);
+	}
+}
+
+__global__ void SumReduction(float* vecA, float* sum, int N) {
+	unsigned int idx = threadIdx.x + blockIdx.x * blockDim.x;
+
+	for (unsigned int stride = blockDim.x; stride >= 1; stride /= 2){
+		if (threadIdx.x < stride) {
+			vecA[idx] += vecA[idx + stride];
+		}
+	}
+
+	if (threadIdx.x == 0){
+		*sum = vecA[threadIdx.x];
+	}
+}
+
+__global__ void maxReduction(float* vecA, float* max, int N){ 
+	unsigned int idx = threadIdx.x;
+	float maxValue;
+
+	for (unsigned int stride = blockDim.x; stride >= 1; stride /= 2){
+		if (threadIdx.x < stride) {
+			if (vecA[idx + stride] > vecA[idx]) {
+				maxVal = vecA[idx + stride];
+			}
+			__syncthreads();
+	
+		}
+		__syncthreads();
+
+	}
+	
+	if (threadIdx.x == 0) {
+		*max = maxVal;
+	}
+}
+
+float* randomVec(int N) {
+	float* M = new float[N];
+	
+	for (int i = 0; i < N; i++) {
+		M[i] = 0.21f * i;
+	}
+
+        return M;
+}
+
+void RunSoftMax(int N = 4096) {
+        float* M = randomVec(N);
+
+        float *Md, *sumd;
+
+	cudaMalloc(&Md, sizeof(float) * N);
+        cudaMalloc(&sumd, sizeof(float)); 
+        cudaMemset(sumd, 0, sizeof(float));  // Important: initialize sum to 0
+	cudaMemcpy(Md, M, sizeof(float) * N, cudaMemcpyHostToDevice);
+
+	dim3 gridDim(BLOCKDIM);
+	dim3 blockDim(THREADDIM);
+
+	// Launch kernels
+	ExponentiateKernel<<<gridDim, blockDim>>>(Md, N);
+	cudaError_t err = cudaGetLastError();
+
+	if (err != cudaSuccess){
+		cout << "Theres some problem: " << "\n" << cudaGetErrorString(err);
+		exit(-1);
+	}
+
+
+        SumReduction<<<gridDim, blockDim>>>(Md, sumd, N);
+	cudaError_t err = cudaGetLastError();
+
+	if (err != cudaSuccess){
+		cout << "Theres some problem: " << "\n" << cudaGetErrorString(err);
+		exit(-1);
+	}
+
+	float sum;
+	cudaMemcpy(&sum, sumd, sizeof(float), cudaMemcpyDeviceToHost);
+
+        softmax<<<gridDim, blockDim>>>(Md, &sum, N);
+	cudaError_t err = cudaGetLastError();
+
+	if (err != cudaSuccess){
+		cout << "Theres some problem: " << "\n" << cudaGetErrorString(err);
+		exit(-1);
+	}
+	cudaDeviceSynchronize();
+
+        float* result = new float[N];
+        cudaMemcpy(result, Md, sizeof(float) * N, cudaMemcpyDeviceToHost);
+
+        // Debug print
+        for (int i = 0; i < N; i++) {
+		cout << result[i] << " ";
+        }
+        cout << endl;
+
+	// Clean up
+	cudaFree(Md);
+	cudaFree(sumd);
+
+	delete[] M;
+	delete[] result;
+
+	cout << "Softmax done and so are all allocs and frees" << endl;
+}
+
+int main() {
+
+	RunSoftMax(N);
+	return 0;
+
+}
+
