@@ -46,26 +46,6 @@ __global__ void SumReduction(float* vecA, float* sum, int N) {
     }
 }
 
-__global__ void maxReduction(float* vecA, float* max, int N){ 
-	unsigned int idx = threadIdx.x + blockIdx.x * blockDim.x;
-	float maxVal;
-
-	for (unsigned int stride = blockDim.x; stride >= 1; stride /= 2){
-		if (threadIdx.x < stride) {
-			if (vecA[idx + stride] > vecA[idx]) {
-				maxVal = vecA[idx + stride];
-			}
-			__syncthreads();
-	
-		}
-		__syncthreads();
-
-	}
-	
-	if (threadIdx.x == 0) {
-		*max = maxVal;
-	}
-}
 
 float* randomVec(int N) {
 	float* M = new float[N];
